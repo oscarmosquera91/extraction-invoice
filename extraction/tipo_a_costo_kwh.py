@@ -15,7 +15,7 @@ class TipoACostoKwhExtractor(BaseExtractor):
 
     def extract(self, text: str) -> dict:
         # Extraer la fecha de la factura para determinar qué meses incluir
-        periodo_match = re.search(r'Periodo\s*[:\-]?\s*(\d{1,2})\-(\d{4})', text)
+        periodo_match = re.search(r'Periodo\s+(\d{1,2})\-(\d{4})', text)
         mes_actual = 12  # Por defecto diciembre
         
         if periodo_match:
@@ -28,51 +28,67 @@ class TipoACostoKwhExtractor(BaseExtractor):
         actual = None
         promedio = None
         
-        # Buscar la línea que contiene los meses esperados
+        # Buscar la línea que contiene "Actual" y "Promedio" (línea de leyenda)
         lines = text.split('\n')
         
         for i, line in enumerate(lines):
-            # Verificar si esta línea contiene los meses esperados
-            meses_en_linea = [mes for mes in meses_esperados if mes in line]
-            
-            if len(meses_en_linea) >= 4:  # Si encontramos al menos 4 de los 6 meses esperados
-                tiene_actual_promedio = "Actual" in line and "Promedio" in line
+            # Buscar línea con "Actual" y "Promedio"
+            if "Actual" in line and "Promedio" in line:
+                # Esta es la línea de leyenda de meses
+                # Buscar números en las líneas anteriores (pueden estar en múltiples líneas)
+                todos_numeros = []
                 
-                # Buscar la línea de valores anterior más adecuada
-                # Preferir una línea que tenga exactamente 8 números si existe Actual y Promedio
-                valores_line = None
+                # Buscar hacia atrás hasta 6 líneas
+                for j in range(i - 1, max(0, i - 7), -1):
+                    test_line = lines[j].strip()
+                    # No debe contener texto, solo números
+                    if test_line and not test_line.startswith('$') and "kWh" not in test_line:
+                        # Extraer números, pero filtrar IDs muy largos (> 5 dígitos)
+                        numeros = re.findall(r'\d+', test_line)
+                        numeros = [int(n) for n in numeros if int(n) < 10000]
+                        todos_numeros.extend(numeros)
                 
-                if tiene_actual_promedio:
-                    # Buscar hacia atrás hasta 5 líneas
-                    for j in range(i - 1, max(0, i - 6), -1):
-                        test_line = lines[j].strip()
-                        # No debe contener "kWh" y debe tener al menos 8 números
-                        if "kWh" not in test_line and test_line and not test_line.startswith('$'):
-                            numeros = re.findall(r'\d+', test_line)
-                            if len(numeros) >= len(meses_en_linea) + 2:
-                                valores_line = test_line
-                                break
+                # Mapear los números encontrados a los meses esperados en orden
+                # Sin importar si están etiquetados correctamente en el PDF
+                if len(todos_numeros) >= 8:
+                    # Últimos 8 números (6 meses + actual + promedio)
+                    numeros_finales = todos_numeros[-8:]
+                    for j, mes in enumerate(meses_esperados):
+                        historico[mes] = numeros_finales[j]
+                    actual = numeros_finales[-2]
+                    promedio = numeros_finales[-1]
+                elif len(todos_numeros) >= 6:
+                    # Últimos 6 números (solo meses)
+                    numeros_finales = todos_numeros[-6:]
+                    for j, mes in enumerate(meses_esperados):
+                        historico[mes] = numeros_finales[j]
                 
-                if not valores_line and i > 0:
-                    # Fallback: usar la línea anterior directa
-                    valores_line = lines[i - 1].strip()
-                
-                if valores_line:
-                    # Extraer todos los números de la línea de valores
-                    numeros = re.findall(r'\d+', valores_line)
-                    
-                    if tiene_actual_promedio and len(numeros) >= len(meses_en_linea) + 2:
-                        # Mapear valores a meses (los primeros 6)
-                        for j, mes in enumerate(meses_en_linea):
-                            historico[mes] = int(numeros[j])
-                        # Actual y Promedio son los últimos dos números
-                        actual = int(numeros[-2])
-                        promedio = int(numeros[-1])
-                    elif len(numeros) >= len(meses_en_linea):
-                        # Solo mapear meses
-                        for j, mes in enumerate(meses_en_linea):
-                            historico[mes] = int(numeros[j])
+                if historico:
                     break
+        
+        # Si no se encuentra el histórico con el método anterior, usar búsqueda individual por mes
+        if not historico:
+            for mes in meses_esperados:
+                match = re.search(rf"{mes}\s+(\d+)", text)
+                if match:
+                    historico[mes] = int(match.group(1))
+        
+        # Si aún no se encuentran Actual y Promedio, buscar patrones específicos
+        if not actual:
+            actual_match = re.search(r"Actual\s+(\d+)", text)
+            actual = int(actual_match.group(1)) if actual_match else None
+        
+        if not promedio:
+            promedio_match = re.search(r"Promedio\s+(\d+)", text)
+            promedio = int(promedio_match.group(1)) if promedio_match else None
+
+        return {
+            "tipo": "costo_kwh",
+            "unidad": "$/kWh",
+            "meses": historico,
+            "actual": actual,
+            "promedio": promedio
+        }
         
         # Si no se encuentra el histórico con el método anterior, usar búsqueda individual
         if not historico:
